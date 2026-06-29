@@ -1,0 +1,227 @@
+import tkinter as tk
+from tkinter import ttk
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
+import time
+
+class EOTSSimulator:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AN/AAQ-40 EOTS Tactical Simulator")
+        self.root.geometry("900x650")
+        self.root.configure(bg="#0a0f0d")
+
+        # 内部ステータス
+        self.azimuth = 0.0     # 方位角 (度)
+        self.elevation = -15.0 # 仰俯角 (度) - 初期値はやや下向き
+        self.fov = 5.0         # 視野角 (Field of View) 度 (ズーム)
+        self.laser_on = False
+        self.lock_on = False
+        self.flir_mode = "WHOT" # WHOT (White Hot) or BHOT (Black Hot)
+        
+        # 仮想ターゲット初期位置 (X, Y, Z) 米国表記で前方が+Z, 右が+X, 下が+Y
+        self.target_pos = np.array([50.0, 20.0, 800.0]) 
+        self.target_velocity = np.array([-5.0, 0.2, -2.0]) # 毎秒の移動量
+
+        self.create_ui()
+        self.last_time = time.time()
+        self.update_simulation()
+
+    def create_ui(self):
+        # メインフレーム
+        main_frame = tk.Frame(self.root, bg="#0a0f0d")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 左側：EOTS センサーディスプレイ (HUD)
+        self.display_label = tk.Label(main_frame, bg="black", bd=2, relief="ridge")
+        self.display_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 右側：コントロールパネル
+        ctrl_frame = tk.Frame(main_frame, bg="#111815", width=250, bd=1, relief="solid")
+        ctrl_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+        ctrl_frame.pack_propagate(False)
+
+        # タイトルラベル
+        tk.Label(ctrl_frame, text="AN/AAQ-40 EOTS", font=("Arial", 14, "bold"), fg="#00ff66", bg="#111815").pack(pady=10)
+        
+        # センサーモード切替
+        tk.Label(ctrl_frame, text="--- SENSOR MODE ---", fg="#888888", bg="#111815").pack(pady=5)
+        self.mode_btn = tk.Button(ctrl_frame, text="FLIR: WHITE HOT", bg="#22332a", fg="#00ff66", relief="flat", command=self.toggle_flir)
+        self.mode_btn.pack(fill=tk.X, padx=20, pady=2)
+
+        # ズーム倍率 (FOV)
+        tk.Label(ctrl_frame, text="--- OPTICAL ZOOM (FOV) ---", fg="#888888", bg="#111815").pack(pady=5)
+        self.fov_scale = tk.Scale(ctrl_frame, from_=15.0, to=1.0, resolution=0.5, orient=tk.HORIZONTAL, bg="#111815", fg="#00ff66", highlightthickness=0, command=self.set_fov)
+        self.fov_scale.set(self.fov)
+        self.fov_scale.pack(fill=tk.X, padx=20)
+
+        # ジンバルコントロール (手動照準)
+        tk.Label(ctrl_frame, text="--- GIMBAL CONTROL ---", fg="#888888", bg="#111815").pack(pady=5)
+        gimbal_frame = tk.Frame(ctrl_frame, bg="#111815")
+        gimbal_frame.pack()
+        
+        tk.Button(gimbal_frame, text="▲ ELEV+", width=8, bg="#22332a", fg="#00ff66", command=lambda: self.move_gimbal(0, 1.0)).grid(row=0, column=1, pady=2)
+        tk.Button(gimbal_frame, text="◀ AZIM-", width=8, bg="#22332a", fg="#00ff66", command=lambda: self.move_gimbal(-1.0, 0)).grid(row=1, column=0, padx=2)
+        tk.Button(gimbal_frame, text="LOCK", width=8, bg="#ff3333" if self.lock_on else "#332222", fg="white", command=self.toggle_lock).grid(row=1, column=1, padx=2)
+        tk.Button(gimbal_frame, text="AZIM+ ▶", width=8, bg="#22332a", fg="#00ff66", command=lambda: self.move_gimbal(1.0, 0)).grid(row=1, column=2, padx=2)
+        tk.Button(gimbal_frame, text="▼ ELEV-", width=8, bg="#22332a", fg="#00ff66", command=lambda: self.move_gimbal(0, -1.0)).grid(row=2, column=1, pady=2)
+
+        # レーザー指定
+        tk.Label(ctrl_frame, text="--- LASER DESIGNATOR ---", fg="#888888", bg="#111815").pack(pady=10)
+        self.laser_btn = tk.Button(ctrl_frame, text="LSR DESG: OFF", bg="#332222", fg="#ff3333", font=("Arial", 10, "bold"), command=self.toggle_laser)
+        self.laser_btn.pack(fill=tk.X, padx=20, pady=5)
+
+        # テレメトリ表示
+        tk.Label(ctrl_frame, text="--- TELEMETRY ---", fg="#888888", bg="#111815").pack(pady=10)
+        self.telemetry_label = tk.Label(ctrl_frame, text="", font=("Courier", 10), fg="#00ff66", bg="#111815", justify=tk.LEFT)
+        self.telemetry_label.pack(fill=tk.BOTH, padx=20, pady=5)
+
+    def toggle_flir(self):
+        if self.flir_mode == "WHOT":
+            self.flir_mode = "BHOT"
+            self.mode_btn.config(text="FLIR: BLACK HOT", bg="#2a2a2a", fg="#ffffff")
+        else:
+            self.flir_mode = "WHOT"
+            self.mode_btn.config(text="FLIR: WHITE HOT", bg="#22332a", fg="#00ff66")
+
+    def set_fov(self, val):
+        self.fov = float(val)
+
+    def move_gimbal(self, az, el):
+        if not self.lock_on:
+            self.azimuth += az
+            self.elevation += el
+
+    def toggle_lock(self):
+        self.lock_on = not self.lock_on
+
+    def toggle_laser(self):
+        self.laser_on = not self.laser_on
+        if self.laser_on:
+            self.laser_btn.config(text="LSR DESG: ACTIVE", bg="#ff3333", fg="white")
+        else:
+            self.laser_btn.config(text="LSR DESG: OFF", bg="#332222", fg="#ff3333")
+
+    def update_simulation(self):
+        # 経過時間の計算とターゲットの移動
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+
+        self.target_pos += self.target_velocity * dt
+        # ターゲットが遠ざかりすぎたらループで戻す
+        if self.target_pos[2] < 100 or self.target_pos[2] > 2000:
+            self.target_pos = np.array([50.0, 20.0, 1500.0])
+
+        # ターゲットの真の方向（方位角・仰俯角）を数学的に計算
+        # X=右、Y=下、Z=前方
+        true_az = np.degrees(np.arctan2(self.target_pos[0], self.target_pos[2]))
+        true_el = np.degrees(np.arctan2(-self.target_pos[1], np.sqrt(self.target_pos[0]**2 + self.target_pos[2]**2)))
+
+        # 自動追尾（LOCK-ON）時のジンバル制御
+        if self.lock_on:
+            # 実際のEOTSのようにターゲット方向にジンバルをスムーズに追従させる
+            self.azimuth += (true_az - self.azimuth) * 0.1
+            self.elevation += (true_el - self.elevation) * 0.1
+
+        # 画像描画領域の作成 (600x500ピクセル)
+        width, height = 600, 500
+        img = np.zeros((height, width), dtype=np.uint8)
+
+        # 1. FLIR背景（赤外線ノイズとグラデーション）の生成
+        bg_base = 60 if self.flir_mode == "WHOT" else 190
+        noise = np.random.randint(-10, 10, (height, width), dtype=np.int16)
+        img = np.clip(img + bg_base + noise, 0, 255).astype(np.uint8)
+
+        # 2. 投影計算 (カメラの視野角FOVに基づく画面上の座標)
+        # 現在のセンサーの中心軸からのズレを計算
+        diff_az = true_az - self.azimuth
+        diff_el = true_el - self.elevation
+
+        # 画面中心からのピクセルオフセット換算
+        pix_per_deg = (width / self.fov)
+        screen_x = int(width / 2 + (diff_az * pix_per_deg))
+        screen_y = int(height / 2 - (diff_el * pix_per_deg)) # 上がプラス
+
+        # ターゲットとの直線距離 (レーザー測距用)
+        distance = np.linalg.norm(self.target_pos)
+
+        # 3. ターゲットの描画（画面内にある場合）
+        # 距離が近いほど大きく表示される
+        tgt_size = max(4, int(5000 / distance * (5.0 / self.fov)))
+        
+        if 0 <= screen_x < width and 0 <= screen_y < height:
+            tgt_color = 255 if self.flir_mode == "WHOT" else 0
+            # サーマル（熱源）の塊を模擬
+            cv2.circle(img, (screen_x, screen_y), tgt_size, tgt_color, -1)
+            cv2.blur(img, (5, 5), img) # 赤外線のボケ感を再現
+
+        # カラーマップの適用 (緑のタクティカルHUD表示にするために3チャンネル化)
+        img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        # 映像全体を戦闘機の夜間ディスプレイ風の緑（または赤外線モノクロ）にする
+        mask = np.zeros_like(img_color)
+        mask[:] = [0, 255, 100] # 緑
+        img_hud = cv2.multiply(img_color, mask // 150)
+
+        # 4. HUDのオーバーレイ表示 (枠線、クロスヘア、情報を描画)
+        # 中央の照準線 (Crosshair)
+        cv2.line(img_hud, (width//2 - 30, height//2), (width//2 - 10, height//2), (0, 255, 0), 1)
+        cv2.line(img_hud, (width//2 + 10, height//2), (width//2 + 30, height//2), (0, 255, 0), 1)
+        cv2.line(img_hud, (width//2, height//2 - 30), (width//2, height//2 - 10), (0, 255, 0), 1)
+        cv2.line(img_hud, (width//2, height//2 + 10), (width//2, height//2 + 30), (0, 255, 0), 1)
+        cv2.circle(img_hud, (width//2, height//2), 2, (0, 255, 0), -1)
+
+        # ロックオン枠の描画
+        if self.lock_on:
+            box_size = tgt_size + 15
+            cv2.rectangle(img_hud, (screen_x - box_size, screen_y - box_size), 
+                          (screen_x + box_size, screen_y + box_size), (0, 255, 0), 1)
+            cv2.putText(img_hud, "TRK[LOCK]", (screen_x - box_size, screen_y - box_size - 5), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        # レーザー照射中のエフェクト（照準中心にドット、およびインジケータ）
+        if self.laser_on:
+            cv2.circle(img_hud, (width//2, height//2), 5, (0, 0, 255), 1)
+            cv2.putText(img_hud, "*LSR*", (width//2 - 18, height//2 - 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        # 画面内テキスト情報 (HUD)
+        cv2.putText(img_hud, f"AZ: {self.azimuth:+.1f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(img_hud, f"EL: {self.elevation:+.1f}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(img_hud, f"FOV: {self.fov:.1f} DEG", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        # 距離計測
+        rng_text = f"RNG: {distance:.1f} m" if self.laser_on or self.lock_on else "RNG: ---- m"
+        cv2.putText(img_hud, rng_text, (430, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(img_hud, f"MODE: IR {self.flir_mode}", (430, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Tkinter用に画像を変換
+        img_rgb = cv2.cvtColor(img_hud, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(img_rgb)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+
+        self.display_label.config(image=img_tk)
+        self.display_label.image = img_tk
+
+        # 右側コントロールパネルのテレメトリテキスト更新
+        telemetry_txt = (
+            f" Target Real-Pos:\n"
+            f"  X: {self.target_pos[0]:.1f}m\n"
+            f"  Y: {self.target_pos[1]:.1f}m\n"
+            f"  Z: {self.target_pos[2]:.1f}m\n\n"
+            f" Gimbal State:\n"
+            f"  Azimuth: {self.azimuth:.2f}\n"
+            f"  Elev   : {self.elevation:.2f}\n\n"
+            f" Systems:\n"
+            f"  Gimbal: {'TRACKING' if self.lock_on else 'MANUAL'}\n"
+            f"  Laser : {'DESIGNATING' if self.laser_on else 'READY'}"
+        )
+        self.telemetry_label.config(text=telemetry_txt)
+
+        # 約30FPSでループ
+        self.root.after(33, self.update_simulation)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = EOTSSimulator(root)
+    root.mainloop()
